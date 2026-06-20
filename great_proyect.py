@@ -536,6 +536,3 @@ else:
                 st.caption("No hay registros en el histórico general.")
 
         conn.close()
-
-
-        
