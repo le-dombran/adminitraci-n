@@ -1,80 +1,56 @@
 import streamlit as st
 import datetime
 from supabase import create_client, Client
+from streamlit_cookies_controller import CookieController  # <-- NUEVA IMPORTACIÓN
 
-st.set_page_config(page_title="Sistema Gestión Cloud", page_icon="💼", layout="wide")
+# --- CONFIGURACIÓN DE LA PÁGINA ---
+st.set_page_config(page_title="Sistema de Gestión Comercial Cloud", page_icon="💼", layout="wide")
 
-SUPABASE_URL = "https://vvvjddoiraljjtqxokcc.supabase.co"
+# Inicializamos el controlador de cookies en el dispositivo
+controller = CookieController()  # <-- NUEVA INSTANCIA
+
+# --- CREDENCIALES DE SUPABASE ---
+# Nota: La URL se compone usando la referencia 'vvvjddoiraljjtqxokcc' extraída del token anon
+SUPABASE_URL = "https://vvvjddoiraljjtxqokcc.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ2dmpkZG9pcmFsamp0eHFva2NjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4OTU3NjYsImV4cCI6MjA5NzQ3MTc2Nn0.GEB41w3qq-tjKd55jZSie2In7JPqv75J6gGgAcrF2Nc"
 
 @st.cache_resource
-def obtener_cliente_supabase(): return create_client(SUPABASE_URL, SUPABASE_KEY)
+def obtener_cliente_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
 supabase = obtener_cliente_supabase()
 
-# --- SEGURIDAD ---
-def verificar_y_actualizar_suscripcion(u):
-    if not u or u.get("username") == "Brandon": return u
+# --- FUNCIONES DE CONTROL DE SUSCRIPCIÓN Y SEGURIDAD ---
+
+def verificar_y_actualizar_suscripcion(usuario_data):
+    """
+    Verifica si la mensualidad venció. Si venció y seguía 'Activo',
+    lo suspende inmediatamente en la base de datos y actualiza el estado.
+    """
+    if not usuario_data:
+        return None
+
+    username = usuario_data.get("username")
+    estado = usuario_data.get("estado")
+    proximo_pago_str = usuario_data.get("proximo_pago")
+   
+    # El administrador Brandon es inmune a la suspensión automática
+    if username == "Brandon":
+        return usuario_data
+
     hoy = datetime.date.today()
-    if datetime.datetime.strptime(u["proximo_pago"], "%Y-%m-%d").date() < hoy and u["estado"] == "Activo":
-        supabase.table("usuarios").update({"estado": "Suspendido"}).eq("id", u["id"]).execute()
-        u["estado"] = "Suspendido"
-    return u
+    proximo_pago = datetime.datetime.strptime(proximo_pago_str, "%Y-%m-%d").date()
 
-# --- SESIÓN ---
-if "logged_in" not in st.session_state:
-    st.session_state.update({"logged_in": False, "user_id": None, "username": "", "perfil": "", "empresa": ""})
-
-# --- LOGIN ---
-if not st.session_state.logged_in:
-    st.title("🔑 Iniciar Sesión")
-    with st.form("login"):
-        user, pwd = st.text_input("Usuario"), st.text_input("Contraseña", type="password")
-        if st.form_submit_button("Ingresar"):
-            res = supabase.table("usuarios").select("*").eq("username", user).eq("password", pwd).execute()
-            if res.data:
-                data = verificar_y_actualizar_suscripcion(res.data[0])
-                if data["estado"] == "Suspendido": st.error("Cuenta suspendida.")
-                else:
-                    st.session_state.update({"logged_in": True, "user_id": data["id"], "username": data["username"], "empresa": data["nombre_empresa"], "perfil": "admin" if data["username"] == "Brandon" else "cliente"})
-                    st.rerun()
-else:
-    # --- MENÚ CLIENTE ---
-    if st.session_state.perfil == "cliente":
-        opcion = st.sidebar.radio("Menú:", ["📋 Inventario", "➕ Gestionar Productos", "🛒 Ventas"])
-        
-        if opcion == "📋 Inventario":
-            prods = supabase.table("productos").select("*").eq("usuario_id", st.session_state.user_id).execute().data
-            st.table([{"Producto": p["nombre_producto"], "Precio": p["precio"], "Stock": p["cantidad"] if p["cantidad"] and p["cantidad"] > 0 else "∞"} for p in prods])
-
-        elif opcion == "➕ Gestionar Productos":
-            with st.form("add_form", clear_on_submit=True):
-                nombre = st.text_input("Nombre")
-                precio = st.number_input("Precio", min_value=0.0)
-                # 0 = Infinito / Sin control
-                cant = st.number_input("Cantidad (0 para stock infinito)", min_value=0, step=1, value=0)
-                if st.form_submit_button("Guardar"):
-                    supabase.table("productos").insert({"usuario_id": st.session_state.user_id, "nombre_producto": nombre, "precio": precio, "cantidad": cant if cant > 0 else None}).execute()
-                    st.rerun()
-
-        elif opcion == "🛒 Ventas":
-            prods = supabase.table("productos").select("*").eq("usuario_id", st.session_state.user_id).execute().data
-            p_sel = st.selectbox("Producto", [p["nombre_producto"] for p in prods])
-            p_data = next(p for p in prods if p["nombre_producto"] == p_sel)
-            
-            is_limited = p_data["cantidad"] is not None and p_data["cantidad"] > 0
-            st.info(f"Stock actual: {p_data['cantidad'] if is_limited else '∞ (Infinito)'}")
-            
-            cant_v = st.number_input("Cantidad", min_value=1, max_value=p_data["cantidad"] if is_limited else 99999)
-            if st.button("Vender"):
-                if is_limited:
-                    supabase.table("productos").update({"cantidad": p_data["cantidad"] - cant_v}).eq("id", p_data["id"]).execute()
-                supabase.table("ventas").insert({"usuario_id": st.session_state.user_id, "producto": p_sel, "cantidad": cant_v, "total": p_data["precio"] * cant_v, "fecha": str(datetime.date.today())}).execute()
-                st.success("Venta realizada")
-                st.rerun()
-
-    if st.sidebar.button("Cerrar Sesión"):
-        st.session_state.logged_in = False
-        st.rerun()
+    if proximo_pago < hoy and estado == "Activo":
+        # Ejecutar la desactivación automática en la base de datos
+        supabase.table("usuarios")\
+            .update({"estado": "Suspendido"})\
+            .eq("id", usuario_data["id"])\
+            .execute()
+       
+        usuario_data["estado"] = "Suspendido"
+   
+    return usuario_data
 
 def login_user(user, pwd):
     response = supabase.table("usuarios")\
@@ -82,7 +58,7 @@ def login_user(user, pwd):
         .eq("username", user)\
         .eq("password", pwd)\
         .execute()
-    
+   
     if response.data:
         # Pasar por el filtro de verificación de mensualidad al autenticar
         return verificar_y_actualizar_suscripcion(response.data[0])
@@ -104,15 +80,33 @@ if "logged_in" not in st.session_state:
     st.session_state.perfil = ""
     st.session_state.empresa = ""
 
+# --- COMPROBACIÓN DE COOKIE EN EL DISPOSITIVO ---
+if not st.session_state.logged_in:
+    saved_id = controller.get("saved_user_id")  # Buscamos si hay un ID guardado en este navegador
+    if saved_id:
+        response = supabase.table("usuarios")\
+            .select("id, username, password, nombre_empresa, estado, proximo_pago")\
+            .eq("id", saved_id)\
+            .execute()
+        if response.data:
+            user_data = verificar_y_actualizar_suscripcion(response.data[0])
+            # Si el usuario existe y no está suspendido, iniciamos sesión automáticamente
+            if user_data and user_data["estado"] != "Suspendido":
+                st.session_state.logged_in = True
+                st.session_state.user_id = user_data["id"]
+                st.session_state.username = user_data["username"]
+                st.session_state.empresa = user_data["nombre_empresa"]
+                st.session_state.perfil = "admin" if user_data["username"] == "Brandon" else "cliente"
+
 # --- INTERFAZ DE LOG IN ---
 if not st.session_state.logged_in:
     st.title("🔑 Sistema Cloud - Iniciar Sesión")
-    
+   
     with st.form("login_form"):
         usuario_input = st.text_input("Usuario (Empresa)")
         clave_input = st.text_input("Contraseña", type="password")
         boton_entrar = st.form_submit_button("Ingresar al Sistema")
-        
+       
         if boton_entrar:
             user_data = login_user(usuario_input, clave_input)
             if user_data:
@@ -124,6 +118,9 @@ if not st.session_state.logged_in:
                     st.session_state.username = user_data["username"]
                     st.session_state.empresa = user_data["nombre_empresa"]
                     st.session_state.perfil = "admin" if user_data["username"] == "Brandon" else "cliente"
+                    
+                    # GUARDAR SESIÓN: Guardamos el ID en el dispositivo por 30 días (2592000 segundos)
+                    controller.set("saved_user_id", user_data["id"], max_age=2592000)
                     st.rerun()
             else:
                 st.error("Usuario o contraseña incorrectos.")
@@ -132,8 +129,9 @@ if not st.session_state.logged_in:
 else:
     st.sidebar.title(f"🏢 {st.session_state.empresa}")
     st.sidebar.caption(f"👤 Usuario: {st.session_state.username}")
-    
+   
     def cerrar_sesion():
+        controller.remove("saved_user_id")  # BORRAR COOKIE: Eliminamos el acceso del dispositivo al cerrar sesión
         st.session_state.logged_in = False
         st.session_state.user_id = None
         st.session_state.username = ""
@@ -147,15 +145,15 @@ else:
     if st.session_state.perfil == "admin":
         st.sidebar.button("🚪 Cerrar Sesión", on_click=cerrar_sesion)
         st.title("👑 Panel de Control Supremo - Brandon Admin")
-        
+       
         tab1, tab2 = st.tabs(["📊 Monitorear Clientes", "➕ Registrar Nueva Empresa"])
-        
+       
         with tab1:
             st.subheader("Estado de Clientes y Suscripciones en la Nube")
             # Traer todos los clientes excepto al admin
             response = supabase.table("usuarios").select("*").neq("username", "Brandon").order("id").execute()
             clientes = response.data
-            
+           
             if not clientes:
                 st.info("Aún no hay empresas registradas.")
             else:
@@ -163,16 +161,16 @@ else:
                 for cli in clientes:
                     # Filtro pasivo por si el admin visualiza un cliente que ya expiró hoy
                     cli = verificar_y_actualizar_suscripcion(cli)
-                    
+                   
                     cli_id = cli["id"]
                     u_name = cli["username"]
                     n_empresa = cli["nombre_empresa"]
                     estado = cli["estado"]
                     p_pago_str = cli["proximo_pago"]
-                    
+                   
                     p_pago = datetime.datetime.strptime(p_pago_str, "%Y-%m-%d").date()
                     dias_restantes = (p_pago - hoy).days
-                    
+                   
                     with st.expander(f"🏢 {n_empresa.upper()} - ID: {cli_id} ({estado})"):
                         col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
                         with col1:
@@ -209,7 +207,7 @@ else:
                 new_name = st.text_input("Nombre Comercial")
                 fecha_limite = st.date_input("Primer Pago Límite", value=datetime.date.today() + datetime.timedelta(days=30))
                 btn_registrar = st.form_submit_button("Registrar Cliente")
-                
+               
                 if btn_registrar and new_user and new_pass and new_name:
                     data_nuevo = {
                         "username": new_user,
@@ -249,14 +247,15 @@ else:
 
         hoy_str = datetime.date.today().strftime("%Y-%m-%d")
 
-        # --- MÓDULO 1: VER INVENTARIO ---
+# --- MÓDULO 1: VER INVENTARIO ---
         if opcion == "📋 Ver Inventario":
             st.title("📋 Inventario Actual de Productos (Cloud)")
             res_prod = supabase.table("productos").select("nombre_producto, precio, cantidad").eq("usuario_id", st.session_state.user_id).execute()
             mis_productos = res_prod.data
             
             if mis_productos:
-                st.table([{"Producto": p["nombre_producto"], "Precio": f"${p['precio']:,.0f}", "Stock Disponible": p["cantidad"]} for p in mis_productos])
+                # LÓGICA INFINITO: Si cantidad es -1, mostramos "∞ Infinito"
+                st.table([{"Producto": p["nombre_producto"], "Precio": f"${p['precio']:,.0f}", "Stock Disponible": "∞ Infinito" if p["cantidad"] == -1 else p["cantidad"]} for p in mis_productos])
             else:
                 st.info("No tienes productos registrados en tu inventario.")
 
@@ -269,13 +268,19 @@ else:
                 with st.form("add_product_form", clear_on_submit=True):
                     prod_nombre = st.text_input("Nombre del Artículo")
                     prod_precio = st.number_input("Precio de Venta ($)", min_value=0.0, step=500.0)
-                    prod_cant = st.number_input("Cantidad Inicial", min_value=0, step=1)
+                    
+                    # LÓGICA INFINITO: Checkbox para decidir si es infinito o por unidades
+                    es_infinito = st.checkbox("🔄 Stock Infinito (No descontar inventario)")
+                    prod_cant = st.number_input("Cantidad Inicial", min_value=0, step=1, disabled=es_infinito)
+                    
                     if st.form_submit_button("💾 Guardar Nuevo") and prod_nombre:
+                        # Si es infinito guardamos -1, si no, guardamos la cantidad ingresada
+                        cantidad_final = -1 if es_infinito else prod_cant
                         supabase.table("productos").insert({
                             "usuario_id": st.session_state.user_id,
                             "nombre_producto": prod_nombre,
                             "precio": prod_precio,
-                            "cantidad": prod_cant
+                            "cantidad": cantidad_final
                         }).execute()
                         st.toast(f"Producto {prod_nombre} guardado en la nube.")
                         st.rerun()
@@ -292,12 +297,18 @@ else:
                     with st.form("edit_product_form"):
                         nuevo_nombre = st.text_input("Nombre del Producto", value=p_a_editar)
                         nuevo_precio = st.number_input("Precio ($)", min_value=0.0, value=float(precio_edit), step=500.0)
-                        nueva_cantidad = st.number_input("Stock", min_value=0, value=int(cant_edit), step=1)
+                        
+                        # LÓGICA INFINITO: Leemos si el producto ya era infinito (-1)
+                        es_infinito_edit = st.checkbox("🔄 Stock Infinito", value=(cant_edit == -1))
+                        valor_stock_edit = int(cant_edit) if cant_edit != -1 else 0
+                        nueva_cantidad = st.number_input("Stock", min_value=0, value=valor_stock_edit, step=1, disabled=es_infinito_edit)
+                        
                         if st.form_submit_button("💾 Actualizar Cambios") and nuevo_nombre:
+                            cantidad_edit_final = -1 if es_infinito_edit else nueva_cantidad
                             supabase.table("productos").update({
                                 "nombre_producto": nuevo_nombre,
                                 "precio": nuevo_precio,
-                                "cantidad": nueva_cantidad
+                                "cantidad": cantidad_edit_final
                             }).eq("id", id_edit).execute()
                             st.success(f"¡{nuevo_nombre} actualizado!")
                             st.rerun()
@@ -334,11 +345,14 @@ else:
                 p_seleccionado = st.selectbox("Selecciona el producto", nombres_p)
                 p_id, precio_p, stock_disponible = dict_datos[p_seleccionado]
                 
-                st.info(f"📦 Stock disponible: **{stock_disponible}** unidades.")
+                # LÓGICA INFINITO: Mostrar texto adecuado en la terminal de ventas
+                texto_stock = "∞ Infinito" if stock_disponible == -1 else f"{stock_disponible} unidades"
+                st.info(f"📦 Stock disponible: **{texto_stock}**.")
                 cant_vendida = st.number_input("Cantidad Vendida", min_value=1, value=1, step=1)
                 
                 if st.button("⚡ Procesar Venta", type="primary", use_container_width=True):
-                    if cant_vendida > stock_disponible:
+                    # LÓGICA INFINITO: Solo bloquea si no es infinito Y la cantidad vendida supera al stock
+                    if stock_disponible != -1 and cant_vendida > stock_disponible:
                         st.error("❌ **Error de Inventario:** Stock insuficiente.")
                     else:
                         total_venta = precio_p * cant_vendida
@@ -351,10 +365,11 @@ else:
                             "fecha": hoy_str
                         }).execute()
                         
-                        # Descontar Stock
-                        supabase.table("productos").update({
-                            "cantidad": stock_disponible - cant_vendida
-                        }).eq("id", p_id).execute()
+                        # LÓGICA INFINITO: Descontar Stock SOLAMENTE si no es infinito
+                        if stock_disponible != -1:
+                            supabase.table("productos").update({
+                                "cantidad": stock_disponible - cant_vendida
+                            }).eq("id", p_id).execute()
                         
                         st.success(f"¡Venta procesada! Total: ${total_venta:,.0f}")
                         st.rerun()
@@ -385,7 +400,6 @@ else:
                         pass_confirmar = st.text_input("Autorizar con contraseña:", type="password", key=f"pwd_{v_id}")
                         if st.button("Aplicar", key=f"btn_{v_id}"):
                             if verificar_password_por_id(st.session_state.user_id, pass_confirmar):
-                                # Obtener stock actual del producto para reintegrar
                                 res_p_stock = supabase.table("productos").select("id, cantidad").eq("usuario_id", st.session_state.user_id).eq("nombre_producto", v_prod).execute()
                                 
                                 if res_p_stock.data:
@@ -393,12 +407,16 @@ else:
                                     stock_actual = res_p_stock.data[0]["cantidad"]
                                     
                                     if tipo_borrado == "Anulación Completa":
-                                        supabase.table("productos").update({"cantidad": stock_actual + v_cant}).eq("id", prod_id).execute()
+                                        # LÓGICA INFINITO: Solo reintegramos si el stock no es infinito
+                                        if stock_actual != -1:
+                                            supabase.table("productos").update({"cantidad": stock_actual + v_cant}).eq("id", prod_id).execute()
                                         supabase.table("ventas").delete().eq("id", v_id).execute()
                                     else:
                                         precio_u = v_total / v_cant
                                         nueva_cant = v_cant - unds_a_devolver
-                                        supabase.table("productos").update({"cantidad": stock_actual + unds_a_devolver}).eq("id", prod_id).execute()
+                                        # LÓGICA INFINITO: Solo reintegramos si el stock no es infinito
+                                        if stock_actual != -1:
+                                            supabase.table("productos").update({"cantidad": stock_actual + unds_a_devolver}).eq("id", prod_id).execute()
                                         supabase.table("ventas").update({"cantidad": nueva_cant, "total": precio_u * nueva_cant}).eq("id", v_id).execute()
                                     st.rerun()
                             else:
@@ -420,7 +438,6 @@ else:
             res_trim = supabase.table("ventas").select("total").eq("usuario_id", st.session_state.user_id).gte("fecha", hace_90_dias).execute()
             ganancia_trimestral = sum([v["total"] for v in res_trim.data]) if res_trim.data else 0.0
             
-            # Traer ventas para calcular el producto más vendido de forma manual y simple
             res_all_v = supabase.table("ventas").select("producto, cantidad").eq("usuario_id", st.session_state.user_id).execute()
             
             top_prod, top_cant = "Sin datos", 0
