@@ -2,51 +2,79 @@ import streamlit as st
 import datetime
 from supabase import create_client, Client
 
-# --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Sistema de Gestión Comercial Cloud", page_icon="💼", layout="wide")
+st.set_page_config(page_title="Sistema Gestión Cloud", page_icon="💼", layout="wide")
 
-# --- CREDENCIALES DE SUPABASE ---
-# Nota: La URL se compone usando la referencia 'vvvjddoiraljjtqxokcc' extraída del token anon
-SUPABASE_URL = "https://vvvjddoiraljjtxqokcc.supabase.co"
+SUPABASE_URL = "https://vvvjddoiraljjtqxokcc.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ2dmpkZG9pcmFsamp0eHFva2NjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4OTU3NjYsImV4cCI6MjA5NzQ3MTc2Nn0.GEB41w3qq-tjKd55jZSie2In7JPqv75J6gGgAcrF2Nc"
 
 @st.cache_resource
-def obtener_cliente_supabase() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
-
+def obtener_cliente_supabase(): return create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase = obtener_cliente_supabase()
 
-# --- FUNCIONES DE CONTROL DE SUSCRIPCIÓN Y SEGURIDAD ---
-
-def verificar_y_actualizar_suscripcion(usuario_data):
-    """
-    Verifica si la mensualidad venció. Si venció y seguía 'Activo',
-    lo suspende inmediatamente en la base de datos y actualiza el estado.
-    """
-    if not usuario_data:
-        return None
-
-    username = usuario_data.get("username")
-    estado = usuario_data.get("estado")
-    proximo_pago_str = usuario_data.get("proximo_pago")
-    
-    # El administrador Brandon es inmune a la suspensión automática
-    if username == "Brandon":
-        return usuario_data
-
+# --- SEGURIDAD ---
+def verificar_y_actualizar_suscripcion(u):
+    if not u or u.get("username") == "Brandon": return u
     hoy = datetime.date.today()
-    proximo_pago = datetime.datetime.strptime(proximo_pago_str, "%Y-%m-%d").date()
+    if datetime.datetime.strptime(u["proximo_pago"], "%Y-%m-%d").date() < hoy and u["estado"] == "Activo":
+        supabase.table("usuarios").update({"estado": "Suspendido"}).eq("id", u["id"]).execute()
+        u["estado"] = "Suspendido"
+    return u
 
-    if proximo_pago < hoy and estado == "Activo":
-        # Ejecutar la desactivación automática en la base de datos
-        supabase.table("usuarios")\
-            .update({"estado": "Suspendido"})\
-            .eq("id", usuario_data["id"])\
-            .execute()
+# --- SESIÓN ---
+if "logged_in" not in st.session_state:
+    st.session_state.update({"logged_in": False, "user_id": None, "username": "", "perfil": "", "empresa": ""})
+
+# --- LOGIN ---
+if not st.session_state.logged_in:
+    st.title("🔑 Iniciar Sesión")
+    with st.form("login"):
+        user, pwd = st.text_input("Usuario"), st.text_input("Contraseña", type="password")
+        if st.form_submit_button("Ingresar"):
+            res = supabase.table("usuarios").select("*").eq("username", user).eq("password", pwd).execute()
+            if res.data:
+                data = verificar_y_actualizar_suscripcion(res.data[0])
+                if data["estado"] == "Suspendido": st.error("Cuenta suspendida.")
+                else:
+                    st.session_state.update({"logged_in": True, "user_id": data["id"], "username": data["username"], "empresa": data["nombre_empresa"], "perfil": "admin" if data["username"] == "Brandon" else "cliente"})
+                    st.rerun()
+else:
+    # --- MENÚ CLIENTE ---
+    if st.session_state.perfil == "cliente":
+        opcion = st.sidebar.radio("Menú:", ["📋 Inventario", "➕ Gestionar Productos", "🛒 Ventas"])
         
-        usuario_data["estado"] = "Suspendido"
-    
-    return usuario_data
+        if opcion == "📋 Inventario":
+            prods = supabase.table("productos").select("*").eq("usuario_id", st.session_state.user_id).execute().data
+            st.table([{"Producto": p["nombre_producto"], "Precio": p["precio"], "Stock": p["cantidad"] if p["cantidad"] and p["cantidad"] > 0 else "∞"} for p in prods])
+
+        elif opcion == "➕ Gestionar Productos":
+            with st.form("add_form", clear_on_submit=True):
+                nombre = st.text_input("Nombre")
+                precio = st.number_input("Precio", min_value=0.0)
+                # 0 = Infinito / Sin control
+                cant = st.number_input("Cantidad (0 para stock infinito)", min_value=0, step=1, value=0)
+                if st.form_submit_button("Guardar"):
+                    supabase.table("productos").insert({"usuario_id": st.session_state.user_id, "nombre_producto": nombre, "precio": precio, "cantidad": cant if cant > 0 else None}).execute()
+                    st.rerun()
+
+        elif opcion == "🛒 Ventas":
+            prods = supabase.table("productos").select("*").eq("usuario_id", st.session_state.user_id).execute().data
+            p_sel = st.selectbox("Producto", [p["nombre_producto"] for p in prods])
+            p_data = next(p for p in prods if p["nombre_producto"] == p_sel)
+            
+            is_limited = p_data["cantidad"] is not None and p_data["cantidad"] > 0
+            st.info(f"Stock actual: {p_data['cantidad'] if is_limited else '∞ (Infinito)'}")
+            
+            cant_v = st.number_input("Cantidad", min_value=1, max_value=p_data["cantidad"] if is_limited else 99999)
+            if st.button("Vender"):
+                if is_limited:
+                    supabase.table("productos").update({"cantidad": p_data["cantidad"] - cant_v}).eq("id", p_data["id"]).execute()
+                supabase.table("ventas").insert({"usuario_id": st.session_state.user_id, "producto": p_sel, "cantidad": cant_v, "total": p_data["precio"] * cant_v, "fecha": str(datetime.date.today())}).execute()
+                st.success("Venta realizada")
+                st.rerun()
+
+    if st.sidebar.button("Cerrar Sesión"):
+        st.session_state.logged_in = False
+        st.rerun()
 
 def login_user(user, pwd):
     response = supabase.table("usuarios")\
@@ -407,5 +435,4 @@ else:
             col_m1, col_m2 = st.columns(2)
             col_m1.metric("🗓️ Ganancias Trimestrales (90d)", f"${ganancia_trimestral:,.0f}")
             col_m2.metric("🏆 Producto Estrella", top_prod, f"{top_cant} unidades" if top_cant > 0 else "")
-
             
