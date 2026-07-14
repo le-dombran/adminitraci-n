@@ -111,7 +111,7 @@ if not st.session_state.logged_in:
             user_data = login_user(usuario_input, clave_input)
             if user_data:
                 if user_data["estado"] == "Suspendido":
-                    st.error("❌ **Servicio Interrumpido.** Tu suscripción ha vencido o está suspendida. Contacta a Brandon para activar el servicio.")
+                    st.error("❌ **Servicio Interrumpido.** Tu suscripción ha vencido o está suspendida. Contacta al administrador para reactivar el servicio.")
                 else:
                     st.session_state.logged_in = True
                     st.session_state.user_id = user_data["id"]
